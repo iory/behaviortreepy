@@ -1,0 +1,12 @@
+[flake8]
+max-line-length = 120
+exclude =
+    .git,
+    .ruff_cache,
+    .pytest_cache,
+    __pycache__,
+    BehaviorTree.CPP,
+    build,
+    .eggs,
+    *.egg-info,
+    src/
