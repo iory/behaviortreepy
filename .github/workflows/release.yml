@@ -1,0 +1,189 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["Run Tests"]
+    types:
+      - completed
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    outputs:
+      mergeResult: ${{ steps.merge.outputs.mergeResult }}
+      prLabels: ${{ steps.get_labels.outputs.labels }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get PR labels
+        id: get_labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = context.payload.workflow_run.pull_requests;
+            if (!prs || prs.length === 0) {
+              core.info("Could not find any pull requests in the workflow run.");
+              core.setOutput("labels", "[]");
+              return;
+            }
+            const prNumber = prs[0].number;
+            core.info(`Found PR number: ${prNumber}`);
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            const labels = pr.labels.map(label => label.name);
+            core.info(`Retrieved labels: ${labels}`);
+            core.setOutput("labels", JSON.stringify(labels));
+
+      - name: Debug labels output
+        run: |
+          echo "Labels output: ${{ steps.get_labels.outputs.labels }}"
+
+      - name: Auto merge if auto-merge-ok label exists
+        id: merge
+        if: contains(fromJson(steps.get_labels.outputs.labels), 'auto-merge-ok')
+        uses: pascalgn/automerge-action@v0.16.3
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          MERGE_LABELS: "auto-merge-ok"
+          MERGE_METHOD: squash
+          MERGE_DELETE_BRANCH: true
+
+  tag-release:
+    runs-on: ubuntu-latest
+    needs: auto-merge
+    if: ${{ needs.auto-merge.outputs.mergeResult == 'merged' && contains(fromJson(needs.auto-merge.outputs.prLabels || '[]'), 'release') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Debug outputs from auto-merge
+        run: |
+          echo "Merge Result: ${{ needs.auto-merge.outputs.mergeResult }}"
+          echo "PR Labels: ${{ needs.auto-merge.outputs.prLabels }}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libzmq3-dev
+
+      - name: Install dependencies and build package
+        run: |
+          python -m pip install --upgrade pip
+          pip install pybind11 scikit-build-core pytest
+          pip install .
+
+      - name: Get version from package
+        id: get_version
+        run: |
+          VERSION="$(python -c "import behaviortreepy; print(behaviortreepy.__version__)")"
+          echo "Detected version: \"$VERSION\""
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and push release
+        run: |
+          git tag "v${{ steps.get_version.outputs.version }}"
+          git push origin "v${{ steps.get_version.outputs.version }}"
+
+  build_sdist:
+    runs-on: ubuntu-latest
+    needs: auto-merge
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: true
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+      - name: Build source distribution
+        run: python -m build --sdist
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist-artifact
+          path: dist/*.tar.gz
+
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }}
+    needs: auto-merge
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            macos_target: ""
+          - os: macos-latest  # ARM-based Apple Silicon
+            macos_target: "15.0"
+          - os: macos-15-intel  # Intel x64
+            macos_target: "14.0"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install cibuildwheel
+        run: python -m pip install cibuildwheel==2.21.3
+
+      - name: Build wheels
+        run: python -m cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-win32 *-musllinux* *-manylinux_i686"
+          CIBW_BEFORE_ALL_LINUX: "yum install -y zeromq-devel || apt-get update && apt-get install -y libzmq3-dev || true"
+          CIBW_BEFORE_ALL_MACOS: "brew install zeromq"
+          # macOS 10.15+ for std::filesystem, 14.0+ for ARM homebrew libs
+          CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }}"
+          CIBW_BUILD_VERBOSITY: 1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
+          path: ./wheelhouse/*.whl
+
+  upload_pypi:
+    needs: [build_wheels, build_sdist, tag-release]
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: cibw-wheels-*
+          merge-multiple: true
+      - name: Download sdist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist-artifact
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
