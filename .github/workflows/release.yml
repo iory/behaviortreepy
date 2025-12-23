@@ -110,7 +110,8 @@ jobs:
       - name: Get version from package
         id: get_version
         run: |
-          VERSION="$(python -c "import behaviortreepy; print(behaviortreepy.__version__)")"
+          # Run from /tmp to avoid importing from local source directory
+          VERSION="$(cd /tmp && python -c "import behaviortreepy; print(behaviortreepy.__version__)")"
           echo "Detected version: \"$VERSION\""
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
