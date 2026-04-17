@@ -137,7 +137,7 @@ public:
     NodeStatus onStart() override {
         py::gil_scoped_acquire acquire;
         try {
-            auto result = on_start_(py::cast(this, py::return_value_policy::reference));
+            auto result = on_start_(py::cast(static_cast<TreeNode*>(this), py::return_value_policy::reference));
             return pyresult_to_status(result);
         } catch (py::error_already_set& e) {
             std::cerr << "Python exception in onStart [" << name() << "]: " << e.what() << std::endl;
@@ -148,7 +148,7 @@ public:
     NodeStatus onRunning() override {
         py::gil_scoped_acquire acquire;
         try {
-            auto result = on_running_(py::cast(this, py::return_value_policy::reference));
+            auto result = on_running_(py::cast(static_cast<TreeNode*>(this), py::return_value_policy::reference));
             return pyresult_to_status(result);
         } catch (py::error_already_set& e) {
             std::cerr << "Python exception in onRunning [" << name() << "]: " << e.what() << std::endl;
@@ -159,7 +159,7 @@ public:
     void onHalted() override {
         py::gil_scoped_acquire acquire;
         try {
-            on_halted_(py::cast(this, py::return_value_policy::reference));
+            on_halted_(py::cast(static_cast<TreeNode*>(this), py::return_value_policy::reference));
         } catch (py::error_already_set& e) {
             std::cerr << "Python exception in onHalted [" << name() << "]: " << e.what() << std::endl;
         }
@@ -408,7 +408,25 @@ PYBIND11_MODULE(_behaviortreepy, m) {
                 }
             };
             factory.registerSimpleDecorator(name, tick_functor);
-        }, py::arg("name"), py::arg("tick_function"), "Register a simple decorator with a Python callback");
+        }, py::arg("name"), py::arg("tick_function"), "Register a simple decorator with a Python callback")
+        .def("register_simple_stateful_action", [](BehaviorTreeFactory& factory,
+                                                    const std::string& name,
+                                                    py::function on_start,
+                                                    py::function on_running,
+                                                    py::object on_halted) {
+            // Promote an absent on_halted to a no-op so PyStatefulActionNode can
+            // call the handle unconditionally without per-tick None-checks.
+            py::function on_halted_fn = on_halted.is_none()
+                ? py::cpp_function([](TreeNode&) {})
+                : on_halted.cast<py::function>();
+            factory.registerNodeType<PyStatefulActionNode>(name, on_start, on_running, on_halted_fn);
+        }, py::arg("name"),
+           py::arg("on_start"),
+           py::arg("on_running"),
+           py::arg("on_halted") = py::none(),
+           "Register a stateful action. on_start/on_running each receive the "
+           "TreeNode and return a NodeStatus; on_halted is optional and "
+           "receives the TreeNode (no return value).");
 
     // StdCoutLogger - must be stored via unique_ptr since it's non-copyable/movable
     py::class_<StdCoutLogger>(m, "StdCoutLogger")

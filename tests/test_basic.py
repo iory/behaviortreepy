@@ -81,6 +81,89 @@ class TestBehaviorTreeFactory:
 
         factory.register_simple_condition("MyCondition", my_condition)
 
+    def test_register_simple_stateful_action_optional_on_halted(self):
+        factory = bt.BehaviorTreeFactory()
+
+        def on_start(node):
+            return bt.NodeStatus.RUNNING
+
+        def on_running(node):
+            return bt.NodeStatus.SUCCESS
+
+        # on_halted defaults to None — must not raise.
+        factory.register_simple_stateful_action("MyStateful", on_start, on_running)
+
+
+class TestStatefulAction:
+    """register_simple_stateful_action: RUNNING across ticks + halt hook."""
+
+    def test_action_spans_multiple_ticks_before_success(self):
+        factory = bt.BehaviorTreeFactory()
+
+        running_seen = [0]
+        started = []
+
+        def on_start(node):
+            started.append(node.uid())
+            return bt.NodeStatus.RUNNING
+
+        def on_running(node):
+            running_seen[0] += 1
+            # Succeed on the third tick so the tree actually dwells in
+            # RUNNING for two additional ticks.
+            return bt.NodeStatus.SUCCESS if running_seen[0] >= 2 else bt.NodeStatus.RUNNING
+
+        factory.register_simple_stateful_action("Work", on_start, on_running)
+        tree = factory.create_tree_from_text(
+            """
+            <root BTCPP_format="4" main_tree_to_execute="T">
+              <BehaviorTree ID="T">
+                <Work/>
+              </BehaviorTree>
+            </root>
+            """.strip()
+        )
+
+        statuses = []
+        for _ in range(10):
+            statuses.append(tree.tick_once())
+            if statuses[-1] != bt.NodeStatus.RUNNING:
+                break
+        assert statuses[-1] == bt.NodeStatus.SUCCESS
+        assert statuses.count(bt.NodeStatus.RUNNING) >= 2
+        assert len(started) == 1  # on_start fires exactly once per run
+
+    def test_on_halted_fires_when_tree_is_halted_externally(self):
+        factory = bt.BehaviorTreeFactory()
+
+        halted = []
+
+        def on_start(node):
+            return bt.NodeStatus.RUNNING
+
+        def on_running(node):
+            return bt.NodeStatus.RUNNING
+
+        def on_halted(node):
+            halted.append(node.uid())
+
+        factory.register_simple_stateful_action(
+            "Forever", on_start, on_running, on_halted
+        )
+        tree = factory.create_tree_from_text(
+            """
+            <root BTCPP_format="4" main_tree_to_execute="T">
+              <BehaviorTree ID="T">
+                <Forever/>
+              </BehaviorTree>
+            </root>
+            """.strip()
+        )
+        assert tree.tick_once() == bt.NodeStatus.RUNNING
+        assert tree.tick_once() == bt.NodeStatus.RUNNING
+        tree.halt_tree()
+        assert len(halted) == 1
+
 
 class TestTreeExecution:
     """Test tree creation and execution."""
